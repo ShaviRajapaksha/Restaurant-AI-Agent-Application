@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-class settings(BaseSettings):
+class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     DATABASE_URL: str = "postgresql+psycopg2://restaurant:restaurant@localhost:5432/restaurant_db"
