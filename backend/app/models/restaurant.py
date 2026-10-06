@@ -5,11 +5,13 @@ import enum
 from app.core.database import Base
 from app.models.base import TimestampMixin
 
+
 class TableStatus(str, enum.Enum):
     AVAILABLE = "AVAILABLE"
     RESERVED = "RESERVED"
     OCCUPIED = "OCCUPIED"
     OUT_OF_SERVICE = "OUT_OF_SERVICE"
+
 
 class Restaurant(Base, TimestampMixin):
     __tablename__ = "restaurants"
@@ -35,6 +37,7 @@ class Restaurant(Base, TimestampMixin):
     reservations = relationship("Reservation", back_populates="restaurant")
     orders = relationship("Order", back_populates="restaurant")
 
+
 class RestaurantTable(Base):
     __tablename__ = "restaurant_tables"
 
@@ -45,16 +48,3 @@ class RestaurantTable(Base):
     status: Mapped[TableStatus] = mapped_column(Enum(TableStatus), default=TableStatus.AVAILABLE)
 
     restaurant = relationship("Restaurant", back_populates="tables")
-
-
-
-
-
-
-
-
-
-
-
-
-
