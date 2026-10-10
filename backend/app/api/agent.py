@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 import json
 
-from app.core.database import get_async_db
+from app.core.database import get_db, SessionLocal
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.schemas.chat import ChatRequest
@@ -15,45 +15,38 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
 @router.post("/chat")
-async def chat(
-    data: ChatRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_async_db),
-):
-    # Capture plain values NOW, while the request-scoped objects are still valid.
-    user_id: int = user.id
-    user_name: str = user.name
-
-    # Create/fetch the conversation with the request-scoped async session.
+async def chat(data: ChatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Streams agent events as Server-Sent Events (SSE)."""
     chat_svc = ChatService(db)
-    conv = await chat_svc.get_or_create_async(
-        user_id=user_id,
-        conversation_id=data.conversation_id,
-        title=data.message[:60] or "New conversation",
-    )
-    conversation_id: int = conv.id
+    conv = chat_svc.get_or_create(user.id, data.conversation_id, title=data.message[:60] or "New conversation")
 
-    async def event_stream():
-        # Send conversation id immediately
-        yield f"data: {json.dumps({'type': 'meta', 'data': {'conversation_id': conversation_id}})}\n\n"
+    # We need a fresh session inside the generator because FastAPI will close the dep one
+    def event_stream():
+        session = SessionLocal()
+        try:
+            runtime = AgentRuntime(session, user.id, conv.id)
+            # Send conversation_id first
+            yield f"data: {json.dumps({'type': 'meta', 'data': {'conversation_id': conv.id}})}\n\n"
 
-        # Fresh async session for the streaming lifetime
-        from app.core.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            runtime = AgentRuntime(session, user_id, conversation_id)
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                async for evt in runtime.run(data.message):
+                agen = runtime.run(data.message)
+                while True:
+                    try:
+                        evt = loop.run_until_complete(agen.__anext__())
+                    except StopAsyncIteration:
+                        break
                     yield f"data: {json.dumps(evt, default=str)}\n\n"
-            except Exception as exc:  # noqa: BLE001
-                err = {"type": "error", "data": {"message": str(exc)}}
-                yield f"data: {json.dumps(err)}\n\n"
+                # close gen
+                try:
+                    loop.run_until_complete(agen.aclose())
+                except Exception:
+                    pass
+            finally:
+                loop.close()
+        finally:
+            session.close()
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disable proxy buffering (nginx)
-            "Connection": "keep-alive",
-        },
-    )
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
