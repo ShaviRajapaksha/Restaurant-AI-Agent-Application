@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from fastapi.responses import StreamingResponse
 import json
+import asyncio
 
 from app.core.database import get_db, SessionLocal
 from app.api.deps import get_current_user
@@ -15,37 +16,35 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
 @router.post("/chat")
-async def chat(data: ChatRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def chat(
+    data: ChatRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Streams agent events as Server-Sent Events (SSE)."""
     chat_svc = ChatService(db)
-    conv = chat_svc.get_or_create(user.id, data.conversation_id, title=data.message[:60] or "New conversation")
+    conv = chat_svc.get_or_create(
+        user.id, data.conversation_id, title=data.message[:60] or "New conversation"
+    )
 
-    # We need a fresh session inside the generator because FastAPI will close the dep one
-    def event_stream():
+    # ---- Snapshot primitives BEFORE the request-scoped session closes ----
+    user_id = user.id
+    conversation_id = conv.id
+    user_message = data.message
+
+    async def event_stream():
+        # Fresh session for the lifetime of the stream
         session = SessionLocal()
         try:
-            runtime = AgentRuntime(session, user.id, conv.id)
-            # Send conversation_id first
-            yield f"data: {json.dumps({'type': 'meta', 'data': {'conversation_id': conv.id}})}\n\n"
+            yield f"data: {json.dumps({'type': 'meta', 'data': {'conversation_id': conversation_id}})}\n\n"
 
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            runtime = AgentRuntime(session, user_id, conversation_id)
+            agen = runtime.run(user_message)
             try:
-                agen = runtime.run(data.message)
-                while True:
-                    try:
-                        evt = loop.run_until_complete(agen.__anext__())
-                    except StopAsyncIteration:
-                        break
+                async for evt in agen:
                     yield f"data: {json.dumps(evt, default=str)}\n\n"
-                # close gen
-                try:
-                    loop.run_until_complete(agen.aclose())
-                except Exception:
-                    pass
             finally:
-                loop.close()
+                await agen.aclose()
         finally:
             session.close()
 
